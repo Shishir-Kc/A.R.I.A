@@ -9,13 +9,11 @@ from pathlib import Path
 import psutil
 
 from logger_config import set_up_logger
-from server.main import logger, logging
 
 # i have made this changes using mobile
 path = str(Path.home() / "test/test.log")
 
-logger = set_up_logger(name="Linux.system", logpath=path)
-print(logger.handlers)
+logging = set_up_logger(name="Linux.system", logpath=path)
 
 
 class Linux:
@@ -42,7 +40,7 @@ class Linux:
 
     def _get_cache_storage(self):
         """Gets storage occupied by Cache"""
-        logger.info("Getting storage occupied by cache")
+        logging.info("Getting storage occupied by cache")
         used = subprocess.run(["du", "-sh", self.cache_dir], capture_output=True, text=True)
         return {
             "used": used.stdout.split("\t")[0],
@@ -71,29 +69,24 @@ class Linux:
 
     def get_apps(self):
         """Gets all the insatlled apps from the Os"""
-        logger.info("Geting applications from desktop")
-        for file in Path(self.application_dir).glob("*.desktop"):
-            yield file
+        logging.info("Geting applications from desktop")
+        yield from Path(self.application_dir).glob(pattern="*.desktop")
 
     def get_cache(self):
         """Gets All the Cache that are  piled up and hugs storage"""
-        for file in Path(self.cache_dir).glob("*"):
-            yield file
+        yield from Path(self.cache_dir).glob("*")
 
     def delete_cache(self):
         """This method will delete the cache that has been piling up !"""
-        logger.info("Getting Cache")
+        logging.info("Getting Cache")
         cahche = self._get_cahe_storage_usage()
         try:
             for _, (application, usage) in enumerate(cahche.items()):
                 logging.info(f"Removing Cache of {application} | cache hold {usage}")
-                subprocess.run(
-                    f"sudo -S rm -rf {application}",
-                    shell=True,
-                )
+                subprocess.run(f"sudo -S rm -rf {application}", shell=True)
             return True
         except Exception as e:
-            logger.debug(e)
+            logging.debug(e)
             return False
 
     def show_cache_info(self):
@@ -107,28 +100,25 @@ class Linux:
         info = self._get_system_ram()
         return info
 
-    def push_notification(self):
-        import notify2
+    def push_notification(self, title: str, body: str = "", timeout_ms: int = 10000) -> bool:
+        import subprocess
 
-        notify2.init("A.R.I.A")
-        n = notify2.Notification(summary="")
-        # set urgency level
-        n.set_urgency(notify2.URGENCY_NORMAL)
+        try:
+            result = subprocess.run(
+                ["notify-send", "--app-name=A.R.I.A", f"--expire-time={timeout_ms}", title, body],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            logging.error("notify-send not found, install libnotify")
+            return False
+        if result.returncode != 0:
+            logging.error("notify-send failed: %s", result.stderr.strip())
+            return False
+        return True
 
-        # set timeout for a notification
-        n.set_timeout(10000)
-        # update notification data for Notification object
-        n.update("test")
 
-        # show notification on screen
-        n.show()
-
-    # short delay between notifications
-
-
-def test_run(): 
+def test_run():
     linu = Linux()
-    linu.push_notification()
-
-if __name__ == "__main__":
-    test_run()
+    linu.push_notification(title="This is a title ", body="This is a Body")
