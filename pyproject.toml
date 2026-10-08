@@ -29,7 +29,7 @@ packages = ["cli", "linux", "agents", "config", "errors", "security", "server", 
 [project.scripts]
 aria = "cli.main:main"
 linux = "linux.system:test_run"
-
+notify = "notifier:main"
 
 [tool.uv.sources]
 kittentts = { git = "https://github.com/KittenML/KittenTTS.git", rev = "main" }
