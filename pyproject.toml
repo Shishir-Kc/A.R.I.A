@@ -6,9 +6,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "cryptography>=49.0.0",
+    "dbus-python>=1.5.0",
     "fastapi[standard]>=0.139.0",
     "huggingface-hub>=1.24.0",
     "kittentts",
+    "notify2>=0.3.1",
     "openai>=2.41.1",
     "psutil>=7.2.2",
     "pydantic>=2.12.5",
@@ -17,8 +19,53 @@ dependencies = [
     "sounddevice>=0.5.5",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cli", "linux", "agents", "config", "errors", "security", "server", "workers"]
+
+
 [project.scripts]
 aria = "cli.main:main"
+linux = "linux.system:test_run"
+
 
 [tool.uv.sources]
 kittentts = { git = "https://github.com/KittenML/KittenTTS.git", rev = "main" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "kittentts.*"
+ignore_missing_imports = true
+
+[tool.basedpyright]
+typeCheckingMode = "standard"
+reportMissingImports = true
+reportMissingTypeStubs = false
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "ruff>=0.16.10",
+]
