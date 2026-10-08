@@ -1,6 +1,4 @@
 import os
-import threading
-import uuid
 
 from config.path_config import ARIA_PATH
 
@@ -17,18 +15,23 @@ the worker will be worked on next month
 worker_path = f"{ARIA_PATH}/Config/worker"
 worker_log = f"{ARIA_PATH}/Logs/worker"
 
-paths = [worker_path,worker_log]
+paths = [worker_path, worker_log]
 for path in paths:
-    os.makedirs(path,exist_ok=True)
+    os.makedirs(path, exist_ok=True)
+
 
 class worker:
     def __init__(self) -> None:
         pass
+
     def check_config(self):
         pass
+
     def add_config(self):
         pass
+
     def stats(self):
         pass
+
     def load_config(self):
         pass
