@@ -8,8 +8,6 @@ dependencies = [
     "cryptography>=49.0.0",
     "dbus-python>=1.5.0",
     "fastapi[standard]>=0.139.0",
-    "huggingface-hub>=1.24.0",
-    "kittentts",
     "openai>=2.41.1",
     "psutil>=7.2.2",
     "pydantic>=2.12.5",
@@ -31,9 +29,6 @@ aria = "cli.main:main"
 linux = "linux.system:test_run"
 notify = "notifier:main"
 
-[tool.uv.sources]
-kittentts = { git = "https://github.com/KittenML/KittenTTS.git", rev = "main" }
-
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -54,9 +49,9 @@ ignore_missing_imports = true
 show_error_codes = true
 plugins = ["pydantic.mypy"]
 
-[[tool.mypy.overrides]]
-module = "kittentts.*"
-ignore_missing_imports = true
+
+
+
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
