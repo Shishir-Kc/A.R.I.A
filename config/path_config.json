@@ -14,9 +14,9 @@
     "Config_path": ".config/A.R.I.A/Additionals/config.json"
   },
   "aria": {
-    "config": "ARIAConfig/config.json"
+    "config": "config/config.json"
   },
   "voice": {
-    "path": ".config//A.R.I.A/Config/Voice"
+    "path": ".config/A.R.I.A/Config/Voice"
   }
 }
