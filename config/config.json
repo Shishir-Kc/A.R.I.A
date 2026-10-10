@@ -1,12 +1,12 @@
 {
   "aria": {
-    "version": "0.0.8",
+    "version": "0.0.9",
     "status": "development",
-    "last_development_changes": "21 July w30 2026",
+    "last_development_changes": "10 Oct w41 2026",
     "version_name": "omega-cooper",
     "stable": "False",
-    "url": "https://raw.githubusercontent.com/Shishir-Kc/E.L.Y.S.I.U.M/refs/heads/main/ElysiumConfig/config.json",
-    "repo": "https://github.com/Shishir-Kc/E.L.Y.S.I.U.M"
+    "url": "https://raw.githubusercontent.com/Shishir-Kc/A.R.I.A/refs/heads/main/config/config.json",
+    "repo": "https://github.com/Shishir-Kc/A.R.I.A"
   },
   "aria_additionals_config": {
     "download_url": "https://raw.githubusercontent.com/Shishir-Kc/Elysium_additionals/refs/heads/main/config.json"
