@@ -1,0 +1,17 @@
+{
+  "name": "test",
+  "description": "asdasd",
+  "path": "adasd",
+  "commands": [
+    {
+      "execution_command": "something",
+      "language": "python",
+      "ignore_laws": true,
+      "is_assigned_woker": false,
+      "woker_id": "N/A"
+    }
+  ],
+  "additionals": {
+    "something": "something"
+  }
+}
