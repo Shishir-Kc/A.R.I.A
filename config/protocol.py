@@ -24,8 +24,8 @@ class Protocol:
                             execution_command="something",
                             language="python",
                             ignore_laws=True,
-                            is_assigned_woker=False,
-                            woker_id="N/A",
+                            is_assigned_worker=False,
+                            worker_id="N/A",
                         )
                     ],
                     additionals={"something": "something"},
