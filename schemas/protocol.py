@@ -5,6 +5,8 @@ class AdditionalCommandsSchema(BaseModel):
     execution_command: str
     language: str
     ignore_laws: bool
+    is_assigned_woker: bool
+    woker_id: str
 
 
 class BaseProtocolSchema(BaseModel):
