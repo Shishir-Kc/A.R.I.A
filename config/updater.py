@@ -31,7 +31,7 @@ def converson(v):
 class Updater:
     def __init__(self) -> None:
         self.ARIA_ROOT = Path.home() / ".A.R.I.A"
-        self.LOCALCONFIG = Path.home() / ".A.R.I.A/ARIAConfig/config.json"
+        self.LOCALCONFIG = Path.home() / ".A.R.I.A/config/config.json"
         self.CLOUDCONFIG = self._get_cloud_config()
 
     def _read_local_config(self):
