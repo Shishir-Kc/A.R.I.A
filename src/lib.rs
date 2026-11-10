@@ -8,3 +8,4 @@ pub mod logger;
 pub mod model_config;
 pub mod notifier;
 pub mod paths;
+pub mod updater;
