@@ -12,3 +12,4 @@ pub mod paths;
 pub mod protocol;
 pub mod updater;
 pub mod voice;
+pub mod worker;
