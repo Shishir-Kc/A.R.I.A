@@ -1,0 +1,23 @@
+[package]
+name = "aria"
+version = "0.1.0"
+edition = "2024"
+description = "AI-powered home-server project"
+readme = "README.md"
+
+[dependencies]
+axum = { version = "0.8.9", features = ["ws"] }
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+fastrand = "2.5.0"
+fernet = { version = "0.2.2", default-features = false, features = ["rustcrypto"] }
+futures-util = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+sysinfo = "0.40.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "net"] }
+ureq = { version = "3.5.1", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
