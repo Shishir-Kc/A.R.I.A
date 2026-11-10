@@ -1,8 +1,0 @@
-{
-  "model": {
-    "provider": "provider_name(Google , OpenAI , Anthropic )",
-    "model_name": "model_name (gemini-3.1-flash-lite , gtp-5.4 , claude-sonnet-4-6",
-    "api_key": "XAPIX",
-    "model_type": "Local/Cloud"
-  }
-}
