@@ -11,6 +11,7 @@ pub mod model_config;
 pub mod notifier;
 pub mod paths;
 pub mod protocol;
+pub mod repl;
 pub mod server;
 pub mod updater;
 pub mod voice;
