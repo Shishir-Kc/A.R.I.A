@@ -2,6 +2,7 @@
 
 pub mod additionals;
 pub mod agents;
+pub mod cli_config;
 pub mod crypto;
 pub mod error;
 pub mod linux;
