@@ -1,25 +1,13 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-*.so
+# Rust build output
+/target
 
-# Elysium_Cli 
-Elysium_Cli/Config/config.json
-Elysium_Cli/Config/config.log
-
-#ELysium_Config
-Elysium_Config/model_config.log
-Elysium_Config/model_config.json
-install.sh
-
-# Virtual environments
-.venv
-.env/
+# Local environment / secrets
 .env
-#Logs
+.env/
+
+# Logs
 Logs/
-Elysium_back_up
+*.log
+
+# Stale Python caches
+__pycache__/
