@@ -1,5 +1,7 @@
 //! Agents: picking a provider/model and talking to it.
 
+pub mod nvidia;
+
 use serde_json::{Map, Value};
 
 use crate::error::{AriaError, Result};
