@@ -36,4 +36,4 @@ flowchart LR
   An installed `~/.A.R.I.A/config/config.json` takes precedence for version metadata.
 - Every module has its own logger (`logger.rs`); most write to a file under
   `~/.config/A.R.I.A/Logs`. `aria -v` mirrors log lines to stderr.
-- `worker.rs` and `agents::Agents` are placeholders for planned features.
+- `agents::Agents` is a placeholder for planned features. Workers (`worker/`) are described in [workers.md](workers.md).

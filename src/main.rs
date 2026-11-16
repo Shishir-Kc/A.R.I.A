@@ -17,6 +17,9 @@ use aria::paths::{aria_path, prompt, show_aria_paths};
 use aria::protocol::BaseProtocol;
 use aria::updater::Updater;
 use aria::voice::VoiceConfig;
+use aria::worker::WorkerPaths;
+use aria::worker::ipc::{Request, WorkerState, relative, request};
+use aria::worker::{daemon, tui};
 use aria::{hud, logger, repl, server};
 
 #[derive(Parser)]
@@ -84,6 +87,11 @@ enum Command {
     Shell,
     /// Opens the transparent HUD window
     Hud,
+    /// Manages workers; with no subcommand, opens the worker manager
+    Worker {
+        #[command(subcommand)]
+        command: Option<WorkerCommand>,
+    },
     /// Manages the model config and API keys
     #[command(subcommand)]
     Model(ModelCommand),
@@ -157,6 +165,34 @@ enum VoiceCommand {
     DownloadConfig,
     /// Shows which voice model fits this machine
     SelectModel,
+}
+
+#[derive(Subcommand)]
+enum WorkerCommand {
+    /// Opens the worker manager (the default)
+    Tui,
+    /// Runs the worker daemon
+    Daemon {
+        /// Start it in the background and return
+        #[arg(long)]
+        detach: bool,
+    },
+    /// Lists the workers and their state
+    List,
+    /// Runs a worker now, whatever its schedule
+    Run { name: String },
+    /// Stops a worker's current run and pauses it
+    Stop { name: String },
+    /// Resumes a stopped or failed worker
+    Start { name: String },
+    /// Stops a worker's current run, then starts it again
+    Restart { name: String },
+    /// Re-reads the worker files
+    Reload,
+    /// Stops every worker and the daemon
+    Shutdown,
+    /// Writes an example worker file if there are no workers yet
+    Init,
 }
 
 #[derive(Subcommand)]
@@ -288,6 +324,7 @@ fn run(command: Command) -> Result<()> {
         Command::Chat => repl::chat()?,
         Command::Shell => repl::shell()?,
         Command::Hud => hud::run()?,
+        Command::Worker { command } => run_worker(command.unwrap_or(WorkerCommand::Tui))?,
         Command::Model(command) => run_model(command)?,
         Command::CliConfig(command) => run_cli_config(command)?,
         Command::Additionals(command) => run_additionals(command)?,
@@ -410,6 +447,73 @@ fn run_additionals(command: AdditionalsCommand) -> Result<()> {
                 println!("updated: {}", updated.join(", "));
             }
         }
+    }
+    Ok(())
+}
+
+fn run_worker(command: WorkerCommand) -> Result<()> {
+    let paths = WorkerPaths::default();
+    let say = |req: Request| -> Result<()> {
+        let response = request(&paths.socket, &req)?;
+        println!("{}", response.message.unwrap_or_default());
+        Ok(())
+    };
+    match command {
+        WorkerCommand::Tui => tui::run(paths.clone())?,
+        WorkerCommand::Daemon { detach: false } => daemon::run_daemon(paths.clone())?,
+        WorkerCommand::Daemon { detach: true } => {
+            if request(&paths.socket, &Request::Ping).is_ok() {
+                println!("the worker daemon is already running");
+                return Ok(());
+            }
+            tui::spawn_daemon()?;
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if request(&paths.socket, &Request::Ping).is_ok() {
+                    println!("worker daemon started ({})", paths.socket.display());
+                    return Ok(());
+                }
+            }
+            return Err(AriaError::Other(
+                "the daemon did not come up; run `aria worker daemon` to see why".into(),
+            ));
+        }
+        WorkerCommand::List => {
+            let response = request(&paths.socket, &Request::Status)?;
+            let now = chrono::Local::now().timestamp();
+            let width = response.workers.iter().map(|w| w.name.len()).max().unwrap_or(4).max(4);
+            println!("{:<10} {:<width$}  {:<14} {:<16} {:<16} RUNS", "STATE", "NAME", "SCHEDULE", "NEXT", "LAST");
+            for w in &response.workers {
+                let next = w.next_run.map_or("—".into(), |t| relative(t, now));
+                let last = match (w.last_start, w.last_exit) {
+                    (Some(t), Some(code)) => format!("{} ({code})", relative(t, now)),
+                    (Some(t), None) => relative(t, now),
+                    _ => "—".into(),
+                };
+                println!(
+                    "{:<10} {:<width$}  {:<14} {:<16} {:<16} {}",
+                    w.state.label(),
+                    w.name,
+                    w.schedule,
+                    next,
+                    last,
+                    w.runs
+                );
+                if let (WorkerState::Invalid | WorkerState::Failed, Some(e)) = (w.state, &w.error) {
+                    println!("{:<10} {}", "", e);
+                }
+            }
+        }
+        WorkerCommand::Run { name } => say(Request::Run { name })?,
+        WorkerCommand::Stop { name } => say(Request::Stop { name })?,
+        WorkerCommand::Start { name } => say(Request::Start { name })?,
+        WorkerCommand::Restart { name } => say(Request::Restart { name })?,
+        WorkerCommand::Reload => say(Request::Reload)?,
+        WorkerCommand::Shutdown => say(Request::Shutdown)?,
+        WorkerCommand::Init => match paths.init_example()? {
+            Some(path) => println!("example workers written to {}", path.display()),
+            None => println!("{} already has worker files", paths.config_dir.display()),
+        },
     }
     Ok(())
 }
