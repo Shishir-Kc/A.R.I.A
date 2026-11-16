@@ -5,6 +5,7 @@ pub mod agents;
 pub mod cli_config;
 pub mod crypto;
 pub mod error;
+pub mod hud;
 pub mod linux;
 pub mod logger;
 pub mod model_config;

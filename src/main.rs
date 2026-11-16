@@ -17,7 +17,7 @@ use aria::paths::{aria_path, prompt, show_aria_paths};
 use aria::protocol::BaseProtocol;
 use aria::updater::Updater;
 use aria::voice::VoiceConfig;
-use aria::{logger, repl, server};
+use aria::{hud, logger, repl, server};
 
 #[derive(Parser)]
 #[command(name = "aria", version, about = "A.R.I.A - AI-powered home server")]
@@ -82,6 +82,8 @@ enum Command {
     Chat,
     /// Starts the interactive shell
     Shell,
+    /// Opens the transparent HUD window
+    Hud,
     /// Manages the model config and API keys
     #[command(subcommand)]
     Model(ModelCommand),
@@ -285,6 +287,7 @@ fn run(command: Command) -> Result<()> {
         Command::Serve { host, port } => server::serve(SocketAddr::new(host, port))?,
         Command::Chat => repl::chat()?,
         Command::Shell => repl::shell()?,
+        Command::Hud => hud::run()?,
         Command::Model(command) => run_model(command)?,
         Command::CliConfig(command) => run_cli_config(command)?,
         Command::Additionals(command) => run_additionals(command)?,
