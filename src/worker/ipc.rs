@@ -76,6 +76,8 @@ pub struct WorkerStatus {
     pub state: WorkerState,
     pub pid: Option<u32>,
     pub error: Option<String>,
+    /// Why the last scheduled run was skipped (an AWL `when:` condition).
+    pub note: Option<String>,
     pub next_run: Option<i64>,
     pub last_start: Option<i64>,
     pub last_end: Option<i64>,

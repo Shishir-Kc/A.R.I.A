@@ -36,6 +36,8 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
 use super::WorkerPaths;
+use super::awl::host::SystemHost;
+use super::awl::{Action, StatusValue};
 use super::ipc::{DaemonInfo, Request, Response, WorkerState, WorkerStatus};
 use super::spec::{
     BACKOFF_BASE, BACKOFF_MAX, MIN_UPTIME, Overlap, RestartLimiter, RestartPolicy, Schedule, Worker,
@@ -43,6 +45,7 @@ use super::spec::{
 };
 use crate::error::{AriaError, Result};
 use crate::logger::Logger;
+use crate::notifier::{Notification, push_notification};
 use crate::paths::{home, log_file, read_json, write_json};
 
 static LOG: LazyLock<Logger> =
@@ -56,6 +59,16 @@ const MAX_SLEEP: Duration = Duration::from_secs(60);
 const LOG_LIMIT: u64 = 5 * 1024 * 1024;
 /// How often the log size of a running worker is checked.
 const LOG_CHECK: Duration = Duration::from_secs(30);
+/// When the `when:` condition of a `daemon` worker says no, how long until
+/// it is asked again.
+const CONDITION_RECHECK: Duration = Duration::from_secs(30);
+/// Longest an AWL condition or hook may take. Its probes read files, and a
+/// path on a hung mount must not stall the daemon.
+const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+/// At most this many `trigger()` runs of one worker per [`TRIGGER_WINDOW`],
+/// so workers that trigger each other can't loop at full speed.
+const TRIGGER_LIMIT: u32 = 10;
+const TRIGGER_WINDOW: Duration = Duration::from_secs(60);
 
 /// What survives a daemon restart, per worker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -98,6 +111,8 @@ struct Shared {
     max_parallel: usize,
     started_at: i64,
     shutdown: Notify,
+    /// Worker names an AWL hook asked to run (`trigger("name")`).
+    triggers: mpsc::UnboundedSender<String>,
 }
 
 impl Shared {
@@ -129,6 +144,7 @@ struct Handle {
 pub struct Supervisor {
     shared: Arc<Shared>,
     handles: tokio::sync::Mutex<HashMap<String, Handle>>,
+    trigger_rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
 }
 
 impl Supervisor {
@@ -138,6 +154,7 @@ impl Supervisor {
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
         let max_parallel = std::thread::available_parallelism().map_or(4, |n| n.get() * 2);
+        let (triggers, trigger_rx) = mpsc::unbounded_channel();
         Self {
             shared: Arc::new(Shared {
                 paths,
@@ -147,8 +164,10 @@ impl Supervisor {
                 max_parallel,
                 started_at: Local::now().timestamp(),
                 shutdown: Notify::new(),
+                triggers,
             }),
             handles: tokio::sync::Mutex::new(HashMap::new()),
+            trigger_rx: Mutex::new(Some(trigger_rx)),
         }
     }
 
@@ -285,9 +304,15 @@ struct Runtime {
     paused: bool,
     failed: bool,
     run_now: bool,
+    /// The pending run was asked for by a person (or a trigger), so it skips
+    /// the `when:` condition.
+    manual: bool,
     startup_done: bool,
     daemon_done: bool,
     retry_at: Option<DateTime<Local>>,
+    /// Set when a `when:` condition said no: the slot it was asked for is
+    /// used up, and the next one starts no earlier than this.
+    hold_until: Option<DateTime<Local>>,
     /// Consecutive failures (backoff exponent).
     attempt: u32,
     /// Retries used for the current scheduled run.
@@ -304,6 +329,9 @@ impl Runtime {
         }
         if self.retry_at.is_some() {
             return self.retry_at;
+        }
+        if let Some(hold) = self.hold_until.filter(|h| *h > now) {
+            return Some(hold);
         }
         match &w.schedule {
             Schedule::Startup => (!self.startup_done).then_some(now),
@@ -335,7 +363,7 @@ impl Runtime {
     /// when the worker must exit.
     fn apply(&mut self, ctl: Ctl, shared: &Shared, name: &str) -> bool {
         match ctl {
-            Ctl::RunNow => self.run_now = true,
+            Ctl::RunNow => (self.run_now, self.manual) = (true, true),
             Ctl::Stop => {
                 self.paused = true;
                 self.retry_at = None;
@@ -344,6 +372,7 @@ impl Runtime {
             Ctl::Start | Ctl::Restart => {
                 self.resume(shared, name);
                 self.run_now = ctl == Ctl::Restart;
+                self.manual = ctl == Ctl::Restart;
             }
             Ctl::Shutdown => return false,
         }
@@ -352,7 +381,7 @@ impl Runtime {
 
     fn resume(&mut self, shared: &Shared, name: &str) {
         (self.paused, self.failed, self.daemon_done) = (false, false, false);
-        (self.attempt, self.retries_used, self.retry_at) = (0, 0, None);
+        (self.attempt, self.retries_used, self.retry_at, self.hold_until) = (0, 0, None, None);
         shared.persist(name, |p| p.paused = false);
     }
 }
@@ -399,8 +428,16 @@ async fn worker_task(w: Worker, shared: Arc<Shared>, mut rx: mpsc::UnboundedRece
             continue;
         }
 
+        // A run asked for by hand, or the retry of a failed scheduled run,
+        // skips the `when:` condition. A `daemon` worker asks it again before
+        // every restart, and a run started by `overlap: replace` asks too.
+        let manual = std::mem::take(&mut rt.manual);
+        let retry = rt.retry_at.is_some() && !matches!(w.schedule, Schedule::Daemon);
         rt.run_now = false;
         rt.retry_at = None;
+        if !manual && !retry && !condition_allows(&w, &shared, &mut rt).await {
+            continue;
+        }
         let run = run_once(&w, &shared, &mut rx, &mut rt).await;
         if run.reason == Some(StopReason::Shutdown) {
             return;
@@ -412,6 +449,9 @@ async fn worker_task(w: Worker, shared: Arc<Shared>, mut rx: mpsc::UnboundedRece
             // Stopped, restarted or replaced on purpose: no retry logic.
             Some(_) => continue,
         };
+        if react(&w, &shared, &mut rt, &run, failed).await {
+            continue;
+        }
         let now = Local::now();
         match w.schedule {
             Schedule::Daemon => {
@@ -456,6 +496,101 @@ async fn worker_task(w: Worker, shared: Arc<Shared>, mut rx: mpsc::UnboundedRece
             }
         }
     }
+}
+
+/// What a script sees as `status`; `run` is the run that just ended, if any.
+fn status_value(w: &Worker, shared: &Shared, rt: &Runtime, run: Option<&RunResult>) -> StatusValue {
+    let p = shared.persisted(&w.name);
+    let (exit, duration_ms) = match run {
+        Some(run) => (run.exit, run.uptime.as_millis() as i64),
+        None => (p.last_exit, p.last_duration_ms.unwrap_or(0) as i64),
+    };
+    StatusValue {
+        name: w.name.clone(),
+        runs: p.runs as i64,
+        failures: p.failures as i64,
+        exit: exit.map_or(-1, i64::from),
+        success: exit == Some(0),
+        duration_ms,
+        retry: rt.retries_used as i64,
+    }
+}
+
+/// Runs AWL evaluation on the blocking pool, so a probe stuck on a hung
+/// mount can't stall the daemon's single thread. `None` after
+/// [`EVAL_TIMEOUT`] (the stuck thread is left to finish on its own).
+async fn evaluate<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    tokio::time::timeout(EVAL_TIMEOUT, tokio::task::spawn_blocking(f)).await.ok()?.ok()
+}
+
+/// Asks the worker's `when:` condition whether this scheduled run goes ahead.
+/// When it says no (or fails), the slot is used up so the worker sleeps
+/// until its next one instead of asking again straight away.
+async fn condition_allows(w: &Worker, shared: &Shared, rt: &mut Runtime) -> bool {
+    let Some(logic) = w.logic.clone().filter(|l| l.has_condition()) else { return true };
+    let status = status_value(w, shared, rt, None);
+    let verdict = evaluate(move || logic.should_run(&SystemHost, status))
+        .await
+        .unwrap_or_else(|| Err(format!("`when:` took longer than {}s; counted as no", EVAL_TIMEOUT.as_secs())));
+    let reason = match verdict {
+        Ok(true) => return true,
+        Ok(false) => "`when:` said no".to_owned(),
+        Err(e) => {
+            append_log(&shared.paths.worker_log(&w.name), &format!("── {e} ──"));
+            LOG.warning(format!("{}: {e}", w.name));
+            e
+        }
+    };
+    let now = Local::now();
+    match &w.schedule {
+        Schedule::Startup => rt.startup_done = true,
+        Schedule::Daemon => {
+            rt.hold_until = Some(now + chrono::Duration::from_std(CONDITION_RECHECK).unwrap_or_default());
+        }
+        timed => rt.hold_until = next_after(timed, now),
+    }
+    let note = format!("skipped at {}: {reason}", now.format("%H:%M:%S"));
+    shared.update(&w.name, |s| {
+        s.skipped += 1;
+        s.note = Some(note);
+    });
+    false
+}
+
+/// Runs the `on_success:` / `on_failure:` hook and carries out what it asks
+/// for. Returns true when the hook paused the worker.
+async fn react(w: &Worker, shared: &Shared, rt: &mut Runtime, run: &RunResult, failed: bool) -> bool {
+    let Some(logic) = w.logic.clone() else { return false };
+    let log_path = shared.paths.worker_log(&w.name);
+    let status = status_value(w, shared, rt, Some(run));
+    let (actions, error) = evaluate(move || logic.react(!failed, &SystemHost, status)).await.unwrap_or_else(|| {
+        (Vec::new(), Some(format!("the hook took longer than {}s and was abandoned", EVAL_TIMEOUT.as_secs())))
+    });
+    if let Some(e) = error {
+        append_log(&log_path, &format!("── {e} ──"));
+        LOG.warning(format!("{}: {e}", w.name));
+    }
+    let hook = if failed { "on_failure" } else { "on_success" };
+    let mut paused = false;
+    for action in actions {
+        match action {
+            Action::Log(message) => append_log(&log_path, &format!("» {message}")),
+            Action::Notify { title, body } => {
+                // notify-send is a short blocking call; keep it off the daemon's one thread.
+                tokio::task::spawn_blocking(move || push_notification(&Notification { title, body }, 5000));
+            }
+            Action::Trigger(name) => {
+                append_log(&log_path, &format!("── {hook}: trigger {name} ──"));
+                let _ = shared.triggers.send(name);
+            }
+            Action::Pause => paused = true,
+        }
+    }
+    if paused {
+        append_log(&log_path, &format!("── paused by {hook}; start it again by hand ──"));
+        rt.apply(Ctl::Stop, shared, &w.name);
+    }
+    paused
 }
 
 struct RunResult {
@@ -532,6 +667,7 @@ async fn run_once(
         s.last_start = Some(started_at.timestamp());
         s.runs = run_no;
         s.error = None;
+        s.note = None;
     });
 
     let started = Instant::now();
@@ -576,7 +712,7 @@ async fn run_once(
                 }
                 Ctl::Restart => {
                     rt.resume(shared, name);
-                    rt.run_now = true;
+                    (rt.run_now, rt.manual) = (true, true);
                     reason = Some(StopReason::Restarted);
                     break stop_child(&mut child).await;
                 }
@@ -758,6 +894,8 @@ pub fn run_daemon(paths: WorkerPaths) -> Result<()> {
         })?;
         fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
         let supervisor = Arc::new(Supervisor::new(paths.clone()));
+        let mut triggers = supervisor.trigger_rx.lock().unwrap().take().expect("taken once");
+        let mut trigger_limits: HashMap<String, RestartLimiter> = HashMap::new();
         let loaded = supervisor.reload().await;
         LOG.info(format!("worker daemon {} listening on {}", std::process::id(), paths.socket.display()));
         println!("worker daemon listening on {}\n{loaded}", paths.socket.display());
@@ -772,6 +910,24 @@ pub fn run_daemon(paths: WorkerPaths) -> Result<()> {
                     Err(e) => LOG.error(format!("accept failed: {e}")),
                 },
                 _ = hangup.recv() => { supervisor.reload().await; }
+                Some(name) = triggers.recv() => {
+                    let limiter = trigger_limits
+                        .entry(name.clone())
+                        .or_insert_with(|| RestartLimiter::new(TRIGGER_LIMIT, TRIGGER_WINDOW));
+                    if !limiter.allow(Instant::now()) {
+                        let msg = format!(
+                            "── trigger ignored: more than {TRIGGER_LIMIT} triggers within {}s (a trigger loop?) ──",
+                            TRIGGER_WINDOW.as_secs()
+                        );
+                        append_log(&paths.worker_log(&name), &msg);
+                        LOG.warning(format!("trigger({name}) ignored: too many"));
+                        continue;
+                    }
+                    let response = supervisor.control(&name, Ctl::RunNow).await;
+                    if !response.ok {
+                        LOG.warning(format!("trigger({name}): {}", response.error.unwrap_or_default()));
+                    }
+                }
                 _ = term.recv() => break,
                 _ = interrupt.recv() => break,
                 _ = supervisor.shared.shutdown.notified() => break,
@@ -806,6 +962,122 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(15), "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// AWL workers in the real daemon: conditions, hooks, triggers, pause.
+    #[test]
+    fn daemon_runs_awl_conditions_and_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = WorkerPaths::under(dir.path());
+        let flag = dir.path().join("flag");
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        let src = format!(
+            r#"
+worker gated:
+    run = "echo gated ran"
+    schedule = every(1s)
+    when: file_exists("{flag}")
+
+worker chained:
+    run = "echo first"
+    on_success:
+        log(f"hook ran after run #{{status.runs}}")
+        trigger("second")
+
+worker second:
+    run = "echo second ran"
+
+worker pauser:
+    run = "exit 4"
+    schedule = Schedule.daemon
+    on_failure:
+        if status.exit == 4:
+            pause()
+
+worker ping:
+    run = "true"
+    on_success: trigger("pong")
+
+worker pong:
+    run = "true"
+    on_success: trigger("ping")
+
+worker gated_service:
+    run = "exit 1"
+    schedule = Schedule.daemon
+    when: status.runs < 1
+"#,
+            flag = flag.display()
+        );
+        fs::write(paths.config_dir.join("test.awl"), src).unwrap();
+        let daemon_paths = paths.clone();
+        let daemon = std::thread::spawn(move || run_daemon(daemon_paths));
+        wait_for("socket", || request(&paths.socket, &Request::Ping).is_ok());
+
+        // A false condition skips each slot once, without spinning.
+        wait_for("gated to skip", || status_of(&paths, "gated").skipped >= 2);
+        let gated = status_of(&paths, "gated");
+        assert_eq!(gated.runs, 0);
+        assert!(gated.note.unwrap().contains("`when:` said no"));
+        std::thread::sleep(Duration::from_millis(1500));
+        let skipped = status_of(&paths, "gated").skipped;
+        assert!(skipped <= 6, "skipped {skipped} times in a few seconds: spinning");
+
+        // Running by hand bypasses the condition.
+        request(&paths.socket, &Request::Run { name: "gated".into() }).unwrap();
+        wait_for("gated manual run", || status_of(&paths, "gated").last_exit == Some(0));
+        assert_eq!(status_of(&paths, "gated").runs, 1);
+
+        // Once the condition holds, scheduled runs go ahead.
+        fs::write(&flag, "").unwrap();
+        wait_for("gated scheduled run", || status_of(&paths, "gated").runs >= 2);
+
+        // on_success logs and triggers another worker.
+        request(&paths.socket, &Request::Run { name: "chained".into() }).unwrap();
+        wait_for("second to be triggered", || status_of(&paths, "second").last_exit == Some(0));
+        let log = fs::read_to_string(paths.worker_log("chained")).unwrap();
+        assert!(log.contains("» hook ran after run #1"), "{log}");
+        assert!(log.contains("trigger second"), "{log}");
+
+        // on_failure pauses a crashing daemon worker instead of restarting it.
+        wait_for("pauser to pause", || status_of(&paths, "pauser").state == WorkerState::Stopped);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(status_of(&paths, "pauser").runs, 1);
+        assert_eq!(status_of(&paths, "pauser").restarts, 0);
+
+        // A daemon worker asks `when:` again before each restart.
+        wait_for("gated_service to be held", || status_of(&paths, "gated_service").skipped >= 1);
+        assert_eq!(status_of(&paths, "gated_service").runs, 1);
+
+        // Workers triggering each other are slowed down, not looped forever.
+        request(&paths.socket, &Request::Run { name: "ping".into() }).unwrap();
+        wait_for("the trigger loop to be cut", || {
+            fs::read_to_string(paths.worker_log("ping")).unwrap_or_default().contains("trigger ignored")
+                || fs::read_to_string(paths.worker_log("pong")).unwrap_or_default().contains("trigger ignored")
+        });
+        let runs = status_of(&paths, "ping").runs + status_of(&paths, "pong").runs;
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(status_of(&paths, "ping").runs + status_of(&paths, "pong").runs, runs);
+        assert!(runs <= 2 * u64::from(TRIGGER_LIMIT) + 2, "{runs}");
+
+        // Editing a hook counts as a change: the worker is reloaded.
+        let edited = fs::read_to_string(paths.config_dir.join("test.awl")).unwrap().replace("hook ran", "edited hook ran");
+        fs::write(paths.config_dir.join("test.awl"), edited).unwrap();
+        request(&paths.socket, &Request::Reload).unwrap();
+        request(&paths.socket, &Request::Run { name: "chained".into() }).unwrap();
+        wait_for("edited hook", || {
+            fs::read_to_string(paths.worker_log("chained")).unwrap_or_default().contains("edited hook ran")
+        });
+
+        // A file that doesn't compile is one invalid entry, with the position.
+        fs::write(paths.config_dir.join("zz-broken.awl"), "worker w:\n    run = 5\n").unwrap();
+        request(&paths.socket, &Request::Reload).unwrap();
+        let broken = status_of(&paths, "zz-broken.awl");
+        assert_eq!(broken.state, WorkerState::Invalid);
+        assert!(broken.error.unwrap().contains("zz-broken.awl:2:11: error[E0308]"));
+
+        request(&paths.socket, &Request::Shutdown).unwrap();
+        daemon.join().unwrap().unwrap();
     }
 
     /// The whole daemon, end to end, in a temp directory.

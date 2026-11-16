@@ -22,7 +22,7 @@ The binary is `target/release/aria`. Run the tests with `cargo test`.
 | `aria serve [--host H] [--port P]` | HTTP server: `/`, `/read` (log stream), `/ws` (echo) |
 | `aria chat` / `aria shell` | Chat with an LLM / interactive shell |
 | `aria hud` | Transparent HUD window (drag to move, Esc to close) |
-| `aria worker` | Worker manager TUI; `aria worker daemon\|list\|run\|stop\|start\|restart\|reload\|init` (see [docs/workers.md](docs/workers.md)) |
+| `aria worker` | Worker manager TUI; `aria worker daemon\|list\|run\|stop\|start\|restart\|reload\|init\|check` (see [docs/workers.md](docs/workers.md), [docs/awl.md](docs/awl.md)) |
 | `aria model download-config\|make\|insert-api\|providers` | Model config and encrypted API keys |
 | `aria cli-config make\|override\|add\|show` | The CLI's own config |
 | `aria additionals list\|check-update\|download <name>\|update` | Plug-and-play skills and tools |
@@ -49,4 +49,5 @@ Add `-v` to any command to see log lines on stderr. Data lives under
 | `src/server.rs` | HTTP / SSE / WebSocket server |
 | `src/hud.rs` | The transparent HUD window (eframe) |
 | `src/worker/` | Worker daemon, scheduler, control socket and TUI ([docs/workers.md](docs/workers.md)) |
+| `src/worker/awl/` | AWL, the typed worker language: lexer, parser, type checker, evaluator ([docs/awl.md](docs/awl.md)) |
 | `src/cli_config.rs`, `src/voice.rs`, `src/protocol.rs`, `src/notifier.rs`, `src/repl.rs` | The rest |

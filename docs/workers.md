@@ -1,11 +1,18 @@
 # Workers
 
-Workers are jobs described in JSON. Drop a file into `~/.config/A.R.I.A/Config/worker/`,
-press `L` in the worker manager (or run `aria worker reload`), and the daemon runs it.
-A user or an agent can add work this way without touching code.
+Workers are jobs described in JSON, or written in **AWL**, the worker
+language. Drop a file into `~/.config/A.R.I.A/Config/worker/`, press `L` in
+the worker manager (or run `aria worker reload`), and the daemon runs it. A
+user or an agent can add work this way without touching code.
+
+JSON says *what* to run and *when*. AWL (`*.awl`) says the same, and adds
+decisions: a typed `when:` condition asked before every scheduled run, and
+`on_success:` / `on_failure:` hooks that log, notify, trigger other workers
+or pause. See [awl.md](awl.md).
 
 ```bash
-aria worker init               # write an example file if there are no workers yet
+aria worker init               # write example files (JSON and AWL) if there are no workers yet
+aria worker check [files]      # type-check worker files without running them
 aria worker daemon --detach    # start the daemon in the background
 aria worker                    # open the worker manager (TUI)
 aria worker list               # same information, as a table
@@ -145,7 +152,8 @@ SIGTERM, that other process keeps running.
 
 | File | Role |
 | --- | --- |
-| `src/worker/spec.rs` | File format, schedule parsing, next-run and backoff maths (pure, tested with fixed clocks) |
+| `src/worker/spec.rs` | File format, schedule parsing, next-run and backoff maths (pure, tested with fixed clocks); loads `*.json` and `*.awl` |
+| `src/worker/awl/` | The AWL compiler and evaluator ([awl.md](awl.md)) |
 | `src/worker/daemon.rs` | Supervisor, per-worker tasks, process control, control socket |
 | `src/worker/ipc.rs` | JSON-lines protocol over `$XDG_RUNTIME_DIR/aria/workers.sock` (owner-only) |
 | `src/worker/tui.rs` | The worker manager |

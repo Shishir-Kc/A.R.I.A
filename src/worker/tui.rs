@@ -425,6 +425,9 @@ fn info_lines(w: &WorkerStatus) -> Vec<Line<'static>> {
         lines.push(Line::from(w.description.clone()).fg(DIM));
     }
     lines.push(Line::default());
+    if let Some(note) = &w.note {
+        lines.push(row("note", note.clone()).fg(Color::Yellow));
+    }
     if let Some(error) = &w.error {
         lines.push(row("error", error.clone()).fg(Color::Red));
     }

@@ -191,8 +191,13 @@ enum WorkerCommand {
     Reload,
     /// Stops every worker and the daemon
     Shutdown,
-    /// Writes an example worker file if there are no workers yet
+    /// Writes example worker files (JSON and AWL) if there are no workers yet
     Init,
+    /// Type-checks worker files without running them (default: all of them)
+    Check {
+        /// `.awl` or `.json` files
+        files: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -502,6 +507,9 @@ fn run_worker(command: WorkerCommand) -> Result<()> {
                 if let (WorkerState::Invalid | WorkerState::Failed, Some(e)) = (w.state, &w.error) {
                     println!("{:<10} {}", "", e);
                 }
+                if let Some(note) = &w.note {
+                    println!("{:<10} {}", "", note);
+                }
             }
         }
         WorkerCommand::Run { name } => say(Request::Run { name })?,
@@ -510,10 +518,27 @@ fn run_worker(command: WorkerCommand) -> Result<()> {
         WorkerCommand::Restart { name } => say(Request::Restart { name })?,
         WorkerCommand::Reload => say(Request::Reload)?,
         WorkerCommand::Shutdown => say(Request::Shutdown)?,
-        WorkerCommand::Init => match paths.init_example()? {
-            Some(path) => println!("example workers written to {}", path.display()),
-            None => println!("{} already has worker files", paths.config_dir.display()),
-        },
+        WorkerCommand::Init => {
+            let written = paths.init_example()?;
+            if written.is_empty() {
+                println!("{} already has worker files", paths.config_dir.display());
+            }
+            for path in written {
+                println!("example workers written to {}", path.display());
+            }
+        }
+        WorkerCommand::Check { files } => {
+            let files = if files.is_empty() { paths.worker_files() } else { files };
+            if files.is_empty() {
+                println!("no worker files in {}", paths.config_dir.display());
+                return Ok(());
+            }
+            let (report, ok) = aria::worker::check_files(&files);
+            print!("{report}");
+            if !ok {
+                return Err(AriaError::Other("some worker files have errors".into()));
+            }
+        }
     }
     Ok(())
 }

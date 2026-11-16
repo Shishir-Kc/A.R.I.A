@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
@@ -12,6 +13,7 @@ use croner::Cron;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::awl;
 use crate::paths::read_json;
 
 /// First retry / restart delay; it doubles on every consecutive failure.
@@ -300,6 +302,8 @@ pub struct Worker {
     pub restart: RestartPolicy,
     pub max_restarts: u32,
     pub restart_window: Duration,
+    /// The `when:` condition and hooks of a worker written in AWL.
+    pub logic: Option<Arc<awl::Logic>>,
 }
 
 impl Worker {
@@ -322,6 +326,7 @@ impl Worker {
             restart: spec.restart.unwrap_or(RestartPolicy::Always),
             max_restarts: spec.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS),
             restart_window: duration(&spec.restart_window)?.unwrap_or(DEFAULT_RESTART_WINDOW),
+            logic: None,
             spec,
         })
     }
@@ -337,15 +342,34 @@ pub struct Entry {
     pub worker: Result<Worker, String>,
 }
 
-/// Reads every `*.json` file in `dir`, in name order. A broken file or
-/// worker becomes an entry with an error; it never stops the others loading.
+/// Is this a worker file (`*.json`, or `*.awl` written in AWL)?
+pub fn is_worker_file(path: &Path) -> bool {
+    path.extension().is_some_and(|x| x == "json" || x == "awl")
+}
+
+/// A worker read from a file: its name, its raw definition, and the worker
+/// (or why it is invalid).
+type Loaded = (String, Value, Result<Worker, String>);
+
+/// Reads one `.awl` file: its workers, or the reason it doesn't compile.
+fn load_awl(file: &Path, file_name: &str) -> Result<Vec<Loaded>, String> {
+    let src = fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let compiled = awl::compile(&src, file_name).map_err(|diags| awl::short_error(&diags, file_name, &src))?;
+    Ok(compiled
+        .into_iter()
+        .map(|c| {
+            let worker = Worker::compile(&c.name, c.spec).map(|w| Worker { logic: c.logic, ..w });
+            (c.name, c.raw, worker)
+        })
+        .collect())
+}
+
+/// Reads every worker file in `dir` (`*.json` and `*.awl`), in name order.
+/// A broken file or worker becomes an entry with an error; it never stops
+/// the others loading. Names must be unique across all files.
 pub fn load_dir(dir: &Path) -> Vec<Entry> {
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|x| x == "json"))
-                .collect()
-        })
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| is_worker_file(p)).collect())
         .unwrap_or_default();
     files.sort();
 
@@ -359,13 +383,27 @@ pub fn load_dir(dir: &Path) -> Vec<Entry> {
             raw: Value::Null,
             worker: Err(error),
         };
-        match read_json(&file) {
-            Ok(Value::Object(map)) => {
-                for (name, raw) in map {
-                    let (name, worker) = if seen.insert(name.clone()) {
+        let found = if file.extension().is_some_and(|x| x == "awl") {
+            load_awl(&file, &file_name)
+        } else {
+            match read_json(&file) {
+                Ok(Value::Object(map)) => Ok(map
+                    .into_iter()
+                    .map(|(name, raw)| {
                         let worker = serde_json::from_value::<WorkerSpec>(raw.clone())
                             .map_err(|e| e.to_string())
                             .and_then(|spec| Worker::compile(&name, spec));
+                        (name, raw, worker)
+                    })
+                    .collect()),
+                Ok(_) => Err("not a JSON object of workers".into()),
+                Err(e) => Err(e.to_string()),
+            }
+        };
+        match found {
+            Ok(workers) => {
+                for (name, raw, worker) in workers {
+                    let (name, worker) = if seen.insert(name.clone()) {
                         (name, worker)
                     } else {
                         (format!("{name}@{file_name}"), Err(format!("duplicate worker name '{name}'")))
@@ -373,8 +411,7 @@ pub fn load_dir(dir: &Path) -> Vec<Entry> {
                     entries.push(Entry { name, source: file.clone(), raw, worker });
                 }
             }
-            Ok(_) => entries.push(broken("not a JSON object of workers".into())),
-            Err(e) => entries.push(broken(e.to_string())),
+            Err(error) => entries.push(broken(error)),
         }
     }
     entries
