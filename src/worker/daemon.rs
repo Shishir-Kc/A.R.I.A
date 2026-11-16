@@ -1092,7 +1092,7 @@ worker gated_service:
                 "crasher": {"command": "exit 3", "schedule": "daemon", "max_restarts": 2, "restart_window": "1m"},
                 "sleeper": {"command": "sleep 60", "schedule": "daemon"},
                 "slow": {"command": "sleep 60", "schedule": "manual", "timeout": "300ms"},
-                "busy": {"command": "sleep 3", "schedule": "every 1s", "overlap": "skip"},
+                "busy": {"command": "sleep 60", "schedule": "every 1s", "overlap": "skip"},
                 "fresh-each-time": {"command": "sleep 3", "schedule": "every 1s", "overlap": "replace"},
                 "broken": {"schedule": "daemon"}
             }"#,
@@ -1139,7 +1139,7 @@ worker gated_service:
         wait_for("a new sleeper process", || status_of(&paths, "sleeper").pid.is_some_and(|p| p != before));
         assert_ne!(unsafe { libc::kill(before as i32, 0) }, 0, "old process still alive");
 
-        // Overlap: a 3s job every 1s is skipped while it runs, or replaced.
+        // Overlap: a long job every 1s is skipped while it runs; a 3s one is replaced.
         wait_for("busy to skip a run", || status_of(&paths, "busy").skipped >= 1);
         assert_eq!(status_of(&paths, "busy").runs, 1);
         wait_for("fresh-each-time to be replaced", || status_of(&paths, "fresh-each-time").runs >= 2);
