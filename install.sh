@@ -88,6 +88,11 @@ expand_path() {
         /*) ;;
         *) path="$PWD/$path" ;;
     esac
+    # Resolve `.` and `..` (PATH entries like ~/.local/share/../bin), so the
+    # same directory always compares equal.
+    if command -v realpath >/dev/null 2>&1; then
+        path=$(realpath -m -- "$path")
+    fi
     printf '%s' "${path%/}"
 }
 

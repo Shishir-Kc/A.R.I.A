@@ -1,7 +1,28 @@
 {
   "start_up": {
     "id": "some_id",
+    "description": "Runs once, when the worker daemon starts",
     "execution_time": "on_startup",
-    "repeat": true
+    "command": ["uname", "-sr"]
+  },
+  "heartbeat": {
+    "description": "Logs the time every 30 seconds",
+    "schedule": "every 30s",
+    "command": "date '+heartbeat %H:%M:%S'",
+    "jitter": "2s"
+  },
+  "disk-report": {
+    "description": "Root filesystem usage, every hour on the hour",
+    "schedule": "0 * * * *",
+    "command": "df -h /",
+    "timeout": "30s",
+    "retries": 2,
+    "catch_up": true
+  },
+  "ticker": {
+    "description": "A long-running worker the daemon keeps alive",
+    "schedule": "daemon",
+    "command": "while true; do echo tick; sleep 10; done",
+    "restart": "always"
   }
 }

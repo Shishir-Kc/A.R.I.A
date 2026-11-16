@@ -30,10 +30,29 @@ flowchart LR
     Crypto --> Paths
 ```
 
+## Workers and AWL
+
+```mermaid
+flowchart LR
+    Files[Config/worker\n*.json, *.awl] --> Load[worker/spec.rs\nload_dir]
+    Load -->|*.json| Spec[WorkerSpec]
+    Load -->|*.awl| Lex[awl/lexer.rs] --> Parse[awl/parser.rs] --> Check[awl/check.rs\ntype checker]
+    Check --> Lower[awl/mod.rs\ncompile, lower]
+    Lower --> Spec
+    Lower --> Logic[Logic\nwhen, on_success, on_failure]
+    Spec --> Worker[Worker::compile]
+    Logic --> Worker
+    Worker --> Daemon[worker/daemon.rs\nsupervisor]
+    Daemon -->|before a scheduled run| Eval[awl/eval.rs\nstep-limited evaluator]
+    Daemon -->|after a run| Eval
+    Eval --> Host[awl/host.rs\nclock, battery, load, disk]
+    Eval -->|Actions: log, notify, trigger, pause| Daemon
+```
+
 ## Notes
 
 - `config/path_config.json` and `config/config.json` are compiled into the binary.
   An installed `~/.A.R.I.A/config/config.json` takes precedence for version metadata.
 - Every module has its own logger (`logger.rs`); most write to a file under
   `~/.config/A.R.I.A/Logs`. `aria -v` mirrors log lines to stderr.
-- `worker.rs` and `agents::Agents` are placeholders for planned features.
+- `agents::Agents` is a placeholder for planned features. Workers (`worker/`) are described in [workers.md](workers.md).

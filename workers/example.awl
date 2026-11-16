@@ -1,0 +1,46 @@
+# Workers written in AWL, the A.R.I.A Worker Language.
+# Python-shaped syntax, Rust-style types: `aria worker check` reports every
+# mistake before the daemon ever runs it. See docs/awl.md.
+
+# Constants and functions are shared by every worker in this file.
+let min_battery = 30
+let quiet_hours: list[int] = [23, 0, 1, 2, 3, 4, 5, 6]
+
+fn can_spend_power() -> bool:
+    return on_ac() or battery() >= min_battery
+
+fn verdict(code: int) -> str:
+    if code == 0:
+        return "ok"
+    elif code >= 128:
+        return f"killed by signal {code - 128}"
+    return f"exit {code}"
+
+worker uptime_report:
+    description = "Logs how long the machine has been up, every 10 minutes"
+    run = ["uptime", "-p"]
+    schedule = every(10m)
+    jitter = 5s
+
+worker old_downloads:
+    description = "Lists downloads older than 30 days, nightly, when on power and outside quiet hours"
+    # Only lists them. Add -delete to the command to actually clean up.
+    run = "find ~/Downloads -maxdepth 1 -type f -mtime +30 -print"
+    schedule = cron("30 21 * * *")
+    timeout = 2m
+    retries = 1
+    catch_up = true
+
+    # Decided again before every scheduled run.
+    when:
+        if hour() in quiet_hours:
+            return false
+        return can_spend_power() and file_exists("~/Downloads")
+
+    on_success: log(f"listed in {status.duration}")
+
+    on_failure:
+        notify("old_downloads failed", verdict(status.exit))
+        if status.failures >= 3:
+            log("failed three times; pausing until someone looks")
+            pause()
