@@ -1,6 +1,8 @@
 //! The worker manager: a terminal UI over the worker daemon, laid out like
 //! lazydocker. Workers on the left with what is coming up and the daemon's
 //! health, the selected worker's logs / info / config on the right.
+//! `Tab` / `Shift+Tab` (or `1` `2` `3`) move between the three left panels;
+//! the right side follows whichever has focus.
 //!
 //! It only talks to the daemon over its socket and reads log files, so it can
 //! be opened and closed at any time without touching the running workers.
@@ -21,6 +23,7 @@ use ratatui::{DefaultTerminal, Frame};
 use super::WorkerPaths;
 use super::ipc::{DaemonInfo, Request, WorkerState, WorkerStatus, human_duration, relative, request};
 use crate::error::Result;
+use crate::paths::log_file;
 
 const REFRESH: Duration = Duration::from_millis(500);
 /// How much of the end of a log file is read.
@@ -39,6 +42,18 @@ enum Tab {
 
 const TABS: [Tab; 3] = [Tab::Logs, Tab::Info, Tab::Config];
 
+/// The left-hand panel that has the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    /// Every worker; ↑↓ pick one.
+    Workers,
+    /// What is running and what runs next; ↑↓ pick one, Enter jumps to it.
+    Upcoming,
+    /// The daemon; the right side shows its own log.
+    Daemon,
+}
+
+const FOCUS_ORDER: [Focus; 3] = [Focus::Workers, Focus::Upcoming, Focus::Daemon];
 
 impl Tab {
     fn title(self) -> &'static str {
@@ -57,6 +72,9 @@ pub struct App {
     /// Why the daemon could not be reached, if it couldn't.
     offline: Option<String>,
     list: ListState,
+    focus: Focus,
+    /// Selection inside "Running & next".
+    upcoming: ListState,
     tab: Tab,
     /// Lines scrolled up from the end of the log (0 = following).
     scroll: usize,
@@ -80,6 +98,8 @@ impl App {
             daemon: None,
             offline: None,
             list: ListState::default().with_selected(Some(0)),
+            focus: Focus::Workers,
+            upcoming: ListState::default(),
             tab: Tab::Logs,
             scroll: 0,
             log: Vec::new(),
@@ -130,7 +150,93 @@ impl App {
             None => self.list.select(Some(0)),
             _ => {}
         }
-        self.log = self.selected().map(|w| tail_lines(Path::new(&w.log_file))).unwrap_or_default();
+        if self.focus == Focus::Upcoming {
+            self.sync_upcoming();
+        }
+        self.reload_log();
+    }
+
+    /// Reads the log the right side shows: the selected worker's, or the
+    /// daemon's own while the daemon panel has focus.
+    fn reload_log(&mut self) {
+        self.log = match self.focus {
+            Focus::Daemon => tail_lines(&log_file("worker-daemon.log")),
+            _ => self.selected().map(|w| tail_lines(Path::new(&w.log_file))).unwrap_or_default(),
+        };
+    }
+
+    /// Workers in "Running & next" order (indexes into `workers`): running
+    /// ones by start time, then the rest by next run.
+    fn upcoming_order(&self) -> Vec<usize> {
+        let mut running: Vec<usize> =
+            (0..self.workers.len()).filter(|&i| self.workers[i].state == WorkerState::Running).collect();
+        running.sort_by_key(|&i| self.workers[i].last_start);
+        let mut next: Vec<usize> = (0..self.workers.len())
+            .filter(|&i| self.workers[i].state != WorkerState::Running && self.workers[i].next_run.is_some())
+            .collect();
+        next.sort_by_key(|&i| self.workers[i].next_run);
+        running.extend(next);
+        running
+    }
+
+    /// Keeps the "Running & next" selection on the selected worker while the
+    /// list reorders; if that worker left the list, stays at the same row.
+    fn sync_upcoming(&mut self) {
+        let order = self.upcoming_order();
+        if order.is_empty() {
+            self.upcoming.select(None);
+            return;
+        }
+        let row = match self.list.selected().and_then(|w| order.iter().position(|&i| i == w)) {
+            Some(row) => row,
+            None => self.upcoming.selected().unwrap_or(0).min(order.len() - 1),
+        };
+        self.upcoming.select(Some(row));
+        self.list.select(Some(order[row]));
+    }
+
+    fn set_focus(&mut self, focus: Focus) {
+        if self.focus == focus {
+            return;
+        }
+        self.focus = focus;
+        self.scroll = 0;
+        if focus == Focus::Upcoming {
+            self.sync_upcoming();
+        }
+        self.reload_log();
+    }
+
+    fn cycle_focus(&mut self, delta: isize) {
+        let i = FOCUS_ORDER.iter().position(|f| *f == self.focus).unwrap_or(0) as isize;
+        self.set_focus(FOCUS_ORDER[(i + delta).rem_euclid(FOCUS_ORDER.len() as isize) as usize]);
+    }
+
+    /// ↑↓ in whichever panel has focus.
+    fn move_selection(&mut self, delta: isize) {
+        match self.focus {
+            Focus::Workers => self.select(delta),
+            Focus::Upcoming => {
+                let order = self.upcoming_order();
+                if order.is_empty() {
+                    return;
+                }
+                let last = order.len() as isize - 1;
+                let row = self.upcoming.selected().map_or(0, |r| (r as isize + delta).clamp(0, last)) as usize;
+                self.upcoming.select(Some(row));
+                self.list.select(Some(order[row]));
+                self.scroll = 0;
+                self.reload_log();
+            }
+            // The daemon has nothing to pick: ↑↓ scroll its log.
+            Focus::Daemon => {
+                self.scroll = if delta < 0 {
+                    (self.scroll + 1).min(self.log.len())
+                } else {
+                    self.scroll.saturating_sub(1)
+                };
+            }
+        }
     }
 
     fn flash(&mut self, text: String, ok: bool) {
@@ -158,7 +264,7 @@ impl App {
         let i = self.list.selected().map_or(0, |i| (i as isize + delta).clamp(0, last));
         self.list.select(Some(i as usize));
         self.scroll = 0;
-        self.log = self.selected().map(|w| tail_lines(Path::new(&w.log_file))).unwrap_or_default();
+        self.reload_log();
     }
 
     fn switch_tab(&mut self, delta: isize) {
@@ -169,14 +275,25 @@ impl App {
     pub fn on_key(&mut self, key: KeyCode) {
         match key {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-            KeyCode::Down | KeyCode::Char('j') => self.select(1),
-            KeyCode::Up | KeyCode::Char('k') => self.select(-1),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab | KeyCode::Char(']') => self.switch_tab(1),
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab | KeyCode::Char('[') => self.switch_tab(-1),
+            KeyCode::Tab => self.cycle_focus(1),
+            KeyCode::BackTab => self.cycle_focus(-1),
+            KeyCode::Char('1') => self.set_focus(Focus::Workers),
+            KeyCode::Char('2') => self.set_focus(Focus::Upcoming),
+            KeyCode::Char('3') => self.set_focus(Focus::Daemon),
+            // Enter on "Running & next" jumps to that worker in the full list.
+            KeyCode::Enter if self.focus == Focus::Upcoming => self.set_focus(Focus::Workers),
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(']') => self.switch_tab(1),
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('[') => self.switch_tab(-1),
             KeyCode::PageUp => self.scroll = (self.scroll + 10).min(self.log.len()),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
             KeyCode::Home | KeyCode::Char('g') => self.scroll = self.log.len(),
             KeyCode::End | KeyCode::Char('G') => self.scroll = 0,
+            // Worker actions don't apply while the daemon panel has focus.
+            KeyCode::Char('r' | 's' | 'R') if self.focus == Focus::Daemon => {
+                self.flash("select a worker first (Tab or 1)".into(), false);
+            }
             KeyCode::Char('r') => self.send(|name| Request::Run { name }),
             KeyCode::Char('s') => {
                 let paused = self
@@ -237,8 +354,8 @@ impl App {
             .collect();
         let title = format!("[1]─Workers ({})", self.workers.len());
         let list = List::new(items)
-            .block(panel(&title, true))
-            .highlight_style(Style::new().bg(Color::Rgb(60, 80, 120)).add_modifier(Modifier::BOLD));
+            .block(panel(&title, self.focus == Focus::Workers))
+            .highlight_style(selection_style(self.focus != Focus::Daemon));
         frame.render_stateful_widget(list, area, &mut self.list);
         if self.workers.is_empty() {
             let hint = if self.daemon.is_some() {
@@ -250,37 +367,33 @@ impl App {
         }
     }
 
-    fn render_upcoming(&self, frame: &mut Frame, area: Rect) {
+    fn render_upcoming(&mut self, frame: &mut Frame, area: Rect) {
         let now = Local::now().timestamp();
-        let mut running: Vec<&WorkerStatus> = self.workers.iter().filter(|w| w.state == WorkerState::Running).collect();
-        running.sort_by_key(|w| w.last_start);
-        let mut next: Vec<&WorkerStatus> = self.workers.iter().filter(|w| w.next_run.is_some()).collect();
-        next.sort_by_key(|w| w.next_run);
-
-        let mut lines: Vec<Line> = running
-            .iter()
-            .map(|w| {
-                let up = w.last_start.map_or(String::new(), |t| human_duration((now - t).max(0) as u64));
-                Line::from(vec![
-                    Span::styled(format!("{:<12}", format!("up {up}")), state_style(WorkerState::Running)),
-                    Span::raw(w.name.clone()),
-                ])
+        let items: Vec<ListItem> = self
+            .upcoming_order()
+            .into_iter()
+            .map(|i| {
+                let w = &self.workers[i];
+                let when = if w.state == WorkerState::Running {
+                    let up = w.last_start.map_or(String::new(), |t| human_duration((now - t).max(0) as u64));
+                    Span::styled(format!("{:<12}", format!("up {up}")), state_style(WorkerState::Running))
+                } else {
+                    let label = if w.state == WorkerState::Backoff { "retry " } else { "" };
+                    Span::styled(
+                        format!("{:<12}", format!("{label}{}", relative(w.next_run.unwrap_or(now), now))),
+                        Style::new().fg(Color::Cyan),
+                    )
+                };
+                ListItem::new(Line::from(vec![when, Span::raw(w.name.clone())]))
             })
             .collect();
-        lines.extend(next.iter().map(|w| {
-            let label = match w.state {
-                WorkerState::Backoff => "retry ",
-                _ => "",
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!("{:<12}", format!("{label}{}", relative(w.next_run.unwrap_or(now), now))),
-                    Style::new().fg(Color::Cyan),
-                ),
-                Span::raw(w.name.clone()),
-            ])
-        }));
-        frame.render_widget(Paragraph::new(lines).block(panel("[2]─Running & next", false)), area);
+        let focused = self.focus == Focus::Upcoming;
+        let list = List::new(items)
+            .block(panel("[2]─Running & next", focused))
+            .highlight_style(selection_style(focused));
+        // Only show a selection here while this panel has focus.
+        let mut state = if focused { self.upcoming } else { ListState::default() };
+        frame.render_stateful_widget(list, area, &mut state);
     }
 
     fn render_daemon(&self, frame: &mut Frame, area: Rect) {
@@ -310,10 +423,30 @@ impl App {
                 Line::from(vec![Span::raw("press "), Span::styled("D", Style::new().fg(ACCENT).bold()), Span::raw(" to start it")]),
             ],
         };
-        frame.render_widget(Paragraph::new(lines).block(panel("[3]─Daemon", false)), area);
+        frame.render_widget(Paragraph::new(lines).block(panel("[3]─Daemon", self.focus == Focus::Daemon)), area);
+    }
+
+    /// The last lines of `self.log` that fit, `scroll` lines up from the end.
+    fn log_view(&self, height: usize, empty: &str) -> Text<'static> {
+        let end = self.log.len().saturating_sub(self.scroll);
+        let start = end.saturating_sub(height);
+        let lines: Vec<Line> = self.log[start..end].iter().map(|l| log_line(l)).collect();
+        if lines.is_empty() { Text::from(empty.to_owned()).fg(DIM) } else { Text::from(lines) }
     }
 
     fn render_main(&self, frame: &mut Frame, area: Rect) {
+        if self.focus == Focus::Daemon {
+            let mut block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .title(Line::from(Span::styled("─Daemon log", Style::new().fg(ACCENT).bold())));
+            if self.scroll > 0 {
+                block = block.title_bottom(Line::from(format!(" ↑ {} lines up · End to follow ", self.scroll)).fg(ACCENT));
+            }
+            let body = block.inner(area);
+            frame.render_widget(block, area);
+            frame.render_widget(Paragraph::new(self.log_view(body.height as usize, "the daemon has not logged anything yet")), body);
+            return;
+        }
         let mut title = vec![Span::raw("─")];
         for (i, tab) in TABS.iter().enumerate() {
             if i > 0 {
@@ -340,12 +473,7 @@ impl App {
 
         match self.tab {
             Tab::Logs => {
-                let height = body_area.height as usize;
-                let end = self.log.len().saturating_sub(self.scroll);
-                let start = end.saturating_sub(height);
-                let lines: Vec<Line> = self.log[start..end].iter().map(|l| log_line(l)).collect();
-                let text = if lines.is_empty() { Text::from("no output yet").fg(DIM) } else { Text::from(lines) };
-                frame.render_widget(Paragraph::new(text), body_area);
+                frame.render_widget(Paragraph::new(self.log_view(body_area.height as usize, "no output yet")), body_area);
             }
             Tab::Info => frame.render_widget(Paragraph::new(info_lines(worker)).wrap(Default::default()), body_area),
             Tab::Config => {
@@ -358,7 +486,11 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let help = "q: quit, ↑↓: select, r: run, s: stop/start, R: restart, L: reload, ←→: tabs, PgUp/PgDn: scroll, D/X: daemon on/off";
+        let help = match self.focus {
+            Focus::Workers => "q: quit, Tab: next panel, ↑↓: select, r: run, s: stop/start, R: restart, ←→: tabs, PgUp/PgDn: scroll, L: reload, D/X: daemon on/off",
+            Focus::Upcoming => "q: quit, Tab: next panel, ↑↓: select, Enter: go to worker, r: run, s: stop/start, R: restart, ←→: tabs, L: reload",
+            Focus::Daemon => "q: quit, Tab: next panel, ↑↓/PgUp/PgDn: scroll log, D: start daemon, X: stop daemon, L: reload workers",
+        };
         let right = match &self.flash {
             Some((text, ok, at)) if at.elapsed() < Duration::from_secs(4) => {
                 Span::styled(text.clone(), Style::new().fg(if *ok { Color::Green } else { Color::Red }))
@@ -379,6 +511,15 @@ fn panel(title: &str, focused: bool) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .border_style(style)
         .title(Span::styled(title.to_owned(), style))
+}
+
+/// The selected row: bright in the focused panel, muted elsewhere.
+fn selection_style(focused: bool) -> Style {
+    if focused {
+        Style::new().bg(Color::Rgb(60, 80, 120)).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().bg(Color::Rgb(45, 50, 62))
+    }
 }
 
 fn inner(area: Rect) -> Rect {
@@ -609,4 +750,65 @@ mod tests {
         assert!(app.quit);
     }
 
+    #[test]
+    fn tab_moves_between_panels() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(WorkerPaths::under(dir.path()));
+        let now = Local::now().timestamp();
+        app.daemon = Some(DaemonInfo { pid: 7, started_at: now, ..Default::default() });
+        app.workers = vec![
+            WorkerStatus { name: "a-later".into(), state: WorkerState::Scheduled, next_run: Some(now + 300), ..Default::default() },
+            WorkerStatus { name: "b-manual".into(), state: WorkerState::Idle, ..Default::default() },
+            WorkerStatus { name: "c-running".into(), state: WorkerState::Running, last_start: Some(now - 5), ..Default::default() },
+            WorkerStatus { name: "d-soon".into(), state: WorkerState::Scheduled, next_run: Some(now + 10), ..Default::default() },
+        ];
+        app.list.select(Some(1));
+        assert_eq!(app.focus, Focus::Workers);
+
+        // Tab: "Running & next". Running first, then by next run; the manual
+        // worker isn't listed, so the selection moves to the first row.
+        app.on_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Upcoming);
+        assert_eq!(app.upcoming_order(), [2, 3, 0]);
+        assert_eq!(app.upcoming.selected(), Some(0));
+        assert_eq!(app.selected().unwrap().name, "c-running");
+        app.on_key(KeyCode::Down);
+        assert_eq!(app.selected().unwrap().name, "d-soon");
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Down);
+        assert_eq!(app.selected().unwrap().name, "a-later", "stops at the last row");
+        app.tab = Tab::Info;
+        let text = screen(&mut app);
+        assert!(text.contains("a-later  scheduled"), "the right side follows the selection:\n{text}");
+
+        // Tab: the daemon panel, whose log replaces the worker view.
+        app.on_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Daemon);
+        let text = screen(&mut app);
+        assert!(text.contains("Daemon log"), "{text}");
+        assert!(text.contains("X: stop daemon"), "{text}");
+        app.on_key(KeyCode::Char('r'));
+        assert!(!app.flash.as_ref().unwrap().1, "worker actions are refused here");
+
+        // Tab wraps around; Shift+Tab goes back.
+        app.on_key(KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Workers);
+        assert_eq!(app.selected().unwrap().name, "a-later", "the pick from the other panel stays");
+        app.on_key(KeyCode::BackTab);
+        assert_eq!(app.focus, Focus::Daemon);
+
+        // Number keys jump; Enter in "Running & next" goes to the worker list.
+        app.on_key(KeyCode::Char('2'));
+        assert_eq!(app.focus, Focus::Upcoming);
+        app.on_key(KeyCode::Up);
+        app.on_key(KeyCode::Enter);
+        assert_eq!(app.focus, Focus::Workers);
+        assert_eq!(app.selected().unwrap().name, "d-soon");
+        app.on_key(KeyCode::Up);
+        assert_eq!(app.selected().unwrap().name, "c-running", "↑↓ now move through every worker");
+
+        // ←→ still switch the right-hand tabs.
+        app.on_key(KeyCode::Right);
+        assert_eq!(app.tab, Tab::Config);
+    }
 }

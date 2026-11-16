@@ -21,6 +21,23 @@ aria worker reload             # re-read the worker files (SIGHUP does the same)
 aria worker shutdown           # stop every worker and the daemon
 ```
 
+### Worker manager keys
+
+The left side has three panels: **[1] Workers**, **[2] Running & next** and
+**[3] Daemon**. The focused one has an orange border, and the right side follows it.
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Next / previous panel (`1` `2` `3` jump straight to one) |
+| `↑` `↓` (`k` `j`) | Pick a worker in Workers or Running & next; scroll the daemon log in Daemon |
+| `Enter` | In Running & next: jump to that worker in the full list |
+| `←` `→` (`h` `l`, `[` `]`) | Logs / Info / Config of the selected worker |
+| `PgUp` `PgDn`, `g` `G` | Scroll the log; `End` follows it again |
+| `r`, `s`, `R` | Run now, stop/start, restart the selected worker |
+| `L` | Reload the worker files |
+| `D` / `X` | Start / stop the daemon |
+| `q` | Quit |
+
 ## Worker file
 
 Each file is an object of `"name": { ... }`. Only `command` is required.
